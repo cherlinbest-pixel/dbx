@@ -1,4 +1,5 @@
-﻿import { useConnectionStore } from "@/stores/connectionStore";
+﻿import { connectionIconType } from "@/lib/connectionPresentation";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
 
@@ -18,6 +19,11 @@ export function connectionColor(connectionId: string): string {
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
   return connectionStore.getConfig(connectionId)?.read_only ?? false;
+}
+
+export function tabConnectionIconType(tab: Pick<QueryTab, "connectionId">): string {
+  const connectionStore = useConnectionStore();
+  return connectionIconType(connectionStore.getConfig(tab.connectionId));
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {

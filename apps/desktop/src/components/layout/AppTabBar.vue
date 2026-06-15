@@ -12,7 +12,8 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
-import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabPresentation";
+import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { connectionColor, isConnectionReadonly, tabConnectionIconType, tabDisplayTitle, tabTooltipLines } from "@/lib/tabPresentation";
 import { hexToRgba } from "@/lib/color";
 import type { QueryTab } from "@/types/database";
 
@@ -309,13 +310,7 @@ function activateTab(tabId: string) {
                   @mousemove="tabDrag.updateTarget($event, tab.id)"
                   @mouseleave="tabDrag.clearTarget(tab.id)"
                 >
-                  <span class="shrink-0" :class="tabIconClass(tab)">
-                    <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
-                    <KeyRound v-else-if="tab.mode === 'etcd'" class="h-3.5 w-3.5" />
-                    <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                    <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                    <Code2 v-else class="h-3.5 w-3.5" />
-                  </span>
+                  <DatabaseIcon :db-type="tabConnectionIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
                   <input
                     v-if="editingTabId === tab.id"
                     v-model="editingTitle"

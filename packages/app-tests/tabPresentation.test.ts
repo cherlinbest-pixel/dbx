@@ -9,6 +9,7 @@ import {
   resultGridCacheKey,
   resultRunItems,
   tabDisplayTitle,
+  tabConnectionIconType,
   tabularResultItems,
 } from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
@@ -65,6 +66,22 @@ function result(columns: string[]): QueryResult {
     execution_time_ms: 1,
   };
 }
+
+test("tab connection icon type prefers driver profile over db type", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    db_type: "jdbc",
+    driver_profile: "mysql",
+  });
+
+  try {
+    assert.equal(tabConnectionIconType(queryTab()), "mysql");
+  } finally {
+    restoreStorage();
+  }
+});
 
 test("query tab display title uses custom title when present", () => {
   const restoreStorage = installMemoryStorage();

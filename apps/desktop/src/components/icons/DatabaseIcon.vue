@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { Database } from "@lucide/vue";
 
 const props = defineProps<{
@@ -81,17 +81,31 @@ const assetIcons: Record<string, string> = {
 
 const letterIcons: Record<string, { letter: string; color: string }> = {};
 
+const assetLoadFailed = ref(false);
+
+watch(
+  () => props.dbType,
+  () => {
+    assetLoadFailed.value = false;
+  },
+);
+
 const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
+const showAsset = computed(() => !!assetName.value && !assetLoadFailed.value);
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
   return assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`;
 });
 const letter = computed(() => letterIcons[normalizedType.value]);
+
+function onAssetError() {
+  assetLoadFailed.value = true;
+}
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" aria-hidden="true" />
+  <img v-if="showAsset" :src="assetSrc" alt="" class="database-logo object-contain" aria-hidden="true" @error="onAssetError" />
   <svg v-else-if="letter" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
     <circle cx="12" cy="12" r="12" :fill="letter.color" />
     <text x="12" y="16.5" text-anchor="middle" fill="white" font-size="14" font-weight="bold" font-family="system-ui, sans-serif">
