@@ -40,6 +40,18 @@ function withDatabase(config: ConnectionConfig, database?: string): ConnectionCo
   return database === undefined ? config : { ...config, database };
 }
 
+function metadataScope(config: ConnectionConfig, database?: string, schema?: string): { config: ConnectionConfig; schema?: string } {
+  if (config.db_type !== "dameng") {
+    return { config: withDatabase(config, database), schema };
+  }
+
+  // Dameng exposes tables under user-owned schemas rather than separate
+  // databases. Accept the legacy database argument as a schema, and default to
+  // the login user when neither argument is provided.
+  const resolvedSchema = schema?.trim() || database?.trim() || config.username?.trim() || undefined;
+  return { config, schema: resolvedSchema };
+}
+
 function connectionIdentity(config: ConnectionConfig): string {
   return `${config.name} (${config.id}) [${config.db_type} @ ${config.host}:${config.port}]`;
 }
@@ -177,14 +189,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
     {
       connection_id: z.string().optional().describe("Unique ID of the DBX connection (use this to disambiguate when multiple connections share the same name)"),
       connection_name: z.string().optional().describe("Name of the DBX connection"),
-      database: z.string().optional().describe("Database name"),
-      schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
+      database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
+      schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, login user for Dameng)"),
     },
     async ({ connection_id, connection_name, database, schema }) => {
       const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
       if (error) return error;
       const resolvedConfig = config!;
-      const tables = await backend.listTables(withDatabase(resolvedConfig, database ?? scope.database), schema);
+      const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
+      const tables = await backend.listTables(scopeValue.config, scopeValue.schema);
       if (tables.length === 0) return text("No tables found.");
       const rows = tables.map((t) => [t.name, t.type]);
       return labeledText(resolvedConfig, mdTable(["Table", "Type"], rows));
@@ -198,14 +211,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       connection_id: z.string().optional().describe("Unique ID of the DBX connection (use this to disambiguate when multiple connections share the same name)"),
       connection_name: z.string().optional().describe("Name of the DBX connection"),
       table: z.string().describe("Table name"),
-      database: z.string().optional().describe("Database name"),
-      schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
+      database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
+      schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, login user for Dameng)"),
     },
     async ({ connection_id, connection_name, table, database, schema }) => {
       const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
       if (error) return error;
       const resolvedConfig = config!;
-      const columns = await backend.describeTable(withDatabase(resolvedConfig, database ?? scope.database), table, schema);
+      const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
+      const columns = await backend.describeTable(scopeValue.config, table, scopeValue.schema);
       if (columns.length === 0) return text("No columns found.");
       const rows = columns.map((c) => [c.is_primary_key ? `${c.name} (PK)` : c.name, c.data_type, c.is_nullable ? "YES" : "NO", c.column_default ?? "", c.comment ?? ""]);
       return labeledText(resolvedConfig, mdTable(["Column", "Type", "Nullable", "Default", "Comment"], rows));
