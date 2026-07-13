@@ -144,6 +144,86 @@ test("suggests PostgreSQL-specific data types and functions", () => {
   );
 });
 
+test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {
+  const keywordCases = [
+    ["tru", "TRUNCATE"],
+    ["mer", "MERGE"],
+    ["dec", "DECLARE"],
+    ["els", "ELSIF"],
+    ["pac", "PACKAGE"],
+    ["seq", "SEQUENCE"],
+    ["flash", "FLASHBACK"],
+    ["mat", "MATERIALIZED VIEW"],
+  ] as const;
+
+  for (const [prefix, expected] of keywordCases) {
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === expected),
+      `${expected} should be suggested for ${prefix}`,
+    );
+  }
+
+  const typeSql = "CREATE TABLE events (payload varc";
+  const typeItems = buildSqlCompletionItems(typeSql, typeSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+  });
+  assert.ok(typeItems.some((item) => item.type === "keyword" && item.label === "VARCHAR2"));
+});
+
+test("does not suggest cross-dialect words for Oracle", () => {
+  const unsupportedWords = ["LIMIT", "LOCALTIME", "USE", "ELSEIF", "SERIAL", "BIGSERIAL", "TEXT", "BOOLEAN", "STRING", "TIME"];
+
+  for (const unsupportedWord of unsupportedWords) {
+    const prefix = unsupportedWord.toLowerCase();
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.equal(
+      items.some((item) => item.type === "keyword" && item.label === unsupportedWord),
+      false,
+      `${unsupportedWord} should not be suggested for Oracle`,
+    );
+  }
+
+  for (const supportedWord of ["LOCALTIMESTAMP", "NUMBER", "VARCHAR2", "XMLTYPE"]) {
+    const prefix = supportedWord.toLowerCase();
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === supportedWord),
+      `${supportedWord} should be suggested for Oracle`,
+    );
+  }
+});
+
+test("keeps TRUNCATE as a statement keyword for Oracle-compatible databases", () => {
+  for (const databaseType of ["oracle", "oceanbase-oracle"] as const) {
+    const items = buildSqlCompletionItems("tru", 3, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+
+    assert.ok(items.some((item) => item.type === "keyword" && item.label === "TRUNCATE"));
+    assert.equal(
+      items.some((item) => item.type === "function" && item.label === "TRUNCATE"),
+      false,
+    );
+  }
+});
+
 test("suggests Manticore Search SQL functions and command snippets", () => {
   const matchItems = buildSqlCompletionItems("select * from products where mat", "select * from products where mat".length, {
     tables,
