@@ -8,11 +8,17 @@ type CachedStructuredFilterRule = {
   conjunction: "AND" | "OR";
   disabled?: boolean;
 };
+type CachedServerColumnFilter = {
+  condition: string;
+  keys: string[];
+  labels: string[];
+};
 type StructuredFilterCacheState = {
   scopeKey: string;
   manualWhereInput: string;
   rules: CachedStructuredFilterRule[];
   appliedWhereInput: string;
+  serverColumnFilters?: Record<number, CachedServerColumnFilter>;
 };
 const structuredFilterStateCache = new Map<string, StructuredFilterCacheState>();
 </script>
@@ -179,6 +185,8 @@ import {
   filterModeUsesRange,
   parseFilterValue,
   parseFilterValues,
+  removeColumnValueFilterCondition,
+  replaceColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
@@ -1172,6 +1180,7 @@ const serverFilterError = ref("");
 const serverFilterOptions = ref<LocalFilterOption[]>([]);
 const serverFilterLimited = ref(false);
 const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
+const serverColumnFilters = ref<Record<number, CachedServerColumnFilter>>({});
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
@@ -1234,27 +1243,34 @@ function localFilterLabel(value: CellValue, columnIndex: number): string {
 }
 
 function localFilterActive(colIdx: number): boolean {
-  return !!localColumnFilters.value[colIdx]?.size;
+  return !!localColumnFilters.value[colIdx]?.size || !!serverColumnFilters.value[colIdx];
 }
 
 const localFilterCount = computed(() => Object.values(localColumnFilters.value).filter((values) => values.size).length);
+const serverColumnFilterCount = computed(() => Object.keys(serverColumnFilters.value).length);
 const hasLocalColumnFilters = computed(() => localFilterCount.value > 0);
-const filterButtonCount = computed(() => structuredFilterCount.value + localFilterCount.value);
-const filterButtonActive = computed(() => hasStructuredFilters.value || hasLocalColumnFilters.value);
+const hasServerColumnFilters = computed(() => serverColumnFilterCount.value > 0);
+const filterButtonCount = computed(() => structuredFilterCount.value + localFilterCount.value + serverColumnFilterCount.value);
+const filterButtonActive = computed(() => hasStructuredFilters.value || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const localFilterSummaries = computed(() =>
-  Object.entries(localColumnFilters.value)
-    .filter(([, selected]) => selected.size > 0)
-    .map(([columnIndexText, selected]) => {
-      const columnIndex = Number(columnIndexText);
-      const labelByKey = new Map(buildLocalFilterOptions(columnIndex).map((option) => [option.key, option.label]));
-      const values = [...selected].map((key) => labelByKey.get(key) ?? key);
-      return {
-        columnIndex,
-        columnName: props.result.columns[columnIndex] ?? `#${columnIndex + 1}`,
-        values: values.slice(0, 3),
-        hiddenValueCount: Math.max(0, values.length - 3),
-      };
-    }),
+  [
+    ...Object.entries(localColumnFilters.value)
+      .filter(([, selected]) => selected.size > 0)
+      .map(([columnIndexText, selected]) => {
+        const columnIndex = Number(columnIndexText);
+        const labelByKey = new Map(buildLocalFilterOptions(columnIndex).map((option) => [option.key, option.label]));
+        return { columnIndex, values: [...selected].map((key) => labelByKey.get(key) ?? key) };
+      }),
+    ...Object.entries(serverColumnFilters.value).map(([columnIndexText, filter]) => ({
+      columnIndex: Number(columnIndexText),
+      values: filter.labels,
+    })),
+  ].map(({ columnIndex, values }) => ({
+    columnIndex,
+    columnName: props.result.columns[columnIndex] ?? `#${columnIndex + 1}`,
+    values: values.slice(0, 3),
+    hiddenValueCount: Math.max(0, values.length - 3),
+  })),
 );
 
 function rowMatchesLocalColumnFilters(data: CellValue[]): boolean {
@@ -1402,9 +1418,10 @@ function syncServerFilterDraft(columnIndex: number, options: LocalFilterOption[]
   const draft = localFilterDraft.value;
   if (!draft || draft.mode !== "server" || draft.columnIndex !== columnIndex) return;
   if (draft.touched) return;
+  const activeFilter = serverColumnFilters.value[columnIndex];
   localFilterDraft.value = {
     ...draft,
-    values: new Set(options.map((option) => option.key)),
+    values: new Set(activeFilter?.keys ?? options.map((option) => option.key)),
   };
 }
 
@@ -1428,7 +1445,8 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
       tableName: tableMeta.tableName,
       columnName,
       columnInfo,
-      whereInput: currentWhereInput(),
+      // Database value enumeration must remain independent from the active filter;
+      // otherwise reopening the same column can only return its previously selected values.
       searchValue: searchValue.trim() || undefined,
       limit: SERVER_COLUMN_FILTER_LIMIT,
       includeCounts: true,
@@ -1766,7 +1784,16 @@ async function applyServerColumnFilter(draft: LocalColumnFilterDraft) {
   const next = { ...localColumnFilters.value };
   delete next[draft.columnIndex];
   localColumnFilters.value = next;
-  whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
+  whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
+  serverColumnFilters.value = {
+    ...serverColumnFilters.value,
+    [draft.columnIndex]: {
+      condition,
+      keys: [...draft.values],
+      labels: values.map((value) => localFilterLabel(value, draft.columnIndex)),
+    },
+  };
   closeLocalFilter();
   await applyWhereFilter();
 }
@@ -1776,31 +1803,64 @@ async function applyTypedLocalFilterValue() {
   if (!draft) return;
   const columnName = props.result.columns[draft.columnIndex];
   if (!columnName) return;
+  const columnInfo = props.tableMeta?.columns.find((column) => column.name === columnName);
   const condition = await buildColumnValueFilterCondition({
     databaseType: resolvedDatabaseType.value,
     columnName,
-    columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
+    columnInfo,
     rawValue: localFilterTypedValue.value,
   });
   if (!condition) return;
   const next = { ...localColumnFilters.value };
   delete next[draft.columnIndex];
   localColumnFilters.value = next;
-  whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  if (draft.mode === "server") {
+    const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
+    const rawValue = localFilterTypedValue.value.trim();
+    const value = (/^null$/i.test(rawValue) ? null : parseFilterValue(rawValue, columnInfo, resolvedDatabaseType.value)) as CellValue;
+    whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
+    serverColumnFilters.value = {
+      ...serverColumnFilters.value,
+      [draft.columnIndex]: {
+        condition,
+        keys: [localFilterKey(value)],
+        labels: [localFilterLabel(value, draft.columnIndex)],
+      },
+    };
+  } else {
+    whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  }
   closeLocalFilter();
   await applyWhereFilter();
 }
 
-function clearLocalFilter(colIdx?: number) {
+function clearLocalFilter(colIdx?: number, applyServerWhereFilter = true) {
+  let removedServerFilter = false;
   if (colIdx === undefined) {
     localColumnFilters.value = {};
+    let nextWhereInput = whereFilterInput.value;
+    for (const filter of Object.values(serverColumnFilters.value)) {
+      nextWhereInput = removeColumnValueFilterCondition(nextWhereInput, filter.condition);
+    }
+    removedServerFilter = Object.keys(serverColumnFilters.value).length > 0;
+    serverColumnFilters.value = {};
+    whereFilterInput.value = nextWhereInput;
   } else {
     const next = { ...localColumnFilters.value };
     delete next[colIdx];
     localColumnFilters.value = next;
+    const serverFilter = serverColumnFilters.value[colIdx];
+    if (serverFilter) {
+      removedServerFilter = true;
+      const nextServerFilters = { ...serverColumnFilters.value };
+      delete nextServerFilters[colIdx];
+      serverColumnFilters.value = nextServerFilters;
+      whereFilterInput.value = removeColumnValueFilterCondition(whereFilterInput.value, serverFilter.condition);
+    }
   }
   closeLocalFilter();
   resetGridVerticalScroll();
+  if (removedServerFilter && applyServerWhereFilter && canUseWhereSearch.value) void applyWhereFilter();
 }
 
 watch(localFilterSearch, (value) => {
@@ -1878,6 +1938,7 @@ function persistStructuredFilterState() {
     manualWhereInput: whereFilterInput.value,
     rules: cloneStructuredFilterRules(structuredFilterRules.value),
     appliedWhereInput: appliedStructuredWhereInput.value,
+    serverColumnFilters: structuredClone(serverColumnFilters.value),
   });
 }
 
@@ -1888,6 +1949,7 @@ function loadStructuredFilterStateForScope() {
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneStructuredFilterRules(cached.rules);
     whereFilterInput.value = cached.manualWhereInput;
+    serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     appliedStructuredWhereInput.value = "";
     void buildStructuredWhereFromRules(structuredFilterRules.value).then((whereInput) => {
       if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
@@ -1897,6 +1959,7 @@ function loadStructuredFilterStateForScope() {
     return;
   }
   appliedStructuredWhereInput.value = "";
+  serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   persistStructuredFilterState();
 }
@@ -1965,7 +2028,7 @@ function resetStructuredFilters() {
 async function clearAllFilters() {
   whereFilterInput.value = "";
   resetStructuredFilters();
-  clearLocalFilter();
+  clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
 }
 
@@ -2018,7 +2081,7 @@ watch(filterBuilderOpen, (open) => {
 });
 
 watch(
-  [structuredFilterRules, appliedStructuredWhereInput],
+  [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
     if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
@@ -4725,7 +4788,7 @@ const exportContextCell = computed(() => {
 const deleteRowDetails = computed(() => (props.tableMeta?.tableName ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName }) : t("dangerDialog.deleteRowDetailsNoTable")));
 
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
-const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value);
+const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
 watch(
@@ -9453,7 +9516,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
               </template>
 
-              <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
+              <slot name="search-bar" :local-filter-count="localFilterCount + serverColumnFilterCount" :has-local-column-filters="hasLocalColumnFilters || hasServerColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
             </div>
           </div>
 
