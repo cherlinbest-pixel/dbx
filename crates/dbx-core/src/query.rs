@@ -46,19 +46,30 @@ pub enum PoolErrorAction {
 
 /// A multi-statement result with metadata intended for query clients.
 ///
-/// `execution_error` is emitted only for synthesized MySQL-protocol errors so
-/// clients can distinguish them from a successful result column named `Error`.
+/// `execution_error` is emitted for synthesized per-statement errors so clients
+/// can distinguish them from a successful result column named `Error`.
+/// `statement_index` is emitted only after a concrete statement starts running.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecuteMultiResult {
     #[serde(flatten)]
     pub result: db::QueryResult,
     #[serde(skip_serializing_if = "is_false")]
     pub execution_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_index: Option<usize>,
 }
 
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
-        Self { result, execution_error: true }
+        Self { result, execution_error: true, statement_index: None }
+    }
+
+    fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
+        Self { result, execution_error: true, statement_index: Some(statement_index) }
+    }
+
+    fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
+        Self { result, execution_error: false, statement_index: Some(statement_index) }
     }
 
     fn into_query_result(self) -> db::QueryResult {
@@ -68,7 +79,7 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false }
+        Self { result, execution_error: false, statement_index: None }
     }
 }
 
@@ -1918,9 +1929,9 @@ pub async fn execute_multi_core_with_options_for_client(
     }
 
     let mut results = Vec::with_capacity(statements.len());
-    for stmt in &statements {
+    for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
-            results.push(error_query_result(canceled_error()));
+            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             break;
         }
         match execute_sql_statement_with_options(
@@ -1934,10 +1945,10 @@ pub async fn execute_multi_core_with_options_for_client(
         )
         .await
         {
-            Ok(r) => results.push(r),
+            Ok(r) => results.push(ExecuteMultiResult::success_with_index(r, statement_index)),
             Err(e) => {
                 let action = query_pool_error_action(db_type, stmt, &e);
-                results.push(error_query_result(e));
+                results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(e), statement_index));
                 if !should_continue_batch_after_error(options.continue_on_error, action) {
                     break;
                 }
@@ -1945,7 +1956,7 @@ pub async fn execute_multi_core_with_options_for_client(
         }
     }
 
-    Ok(results.into_iter().map(Into::into).collect())
+    Ok(results)
 }
 
 trait MysqlBatchStatementExecutor {
@@ -1989,17 +2000,17 @@ where
     E: MysqlBatchStatementExecutor,
 {
     let mut results = Vec::with_capacity(statements.len());
-    for statement in statements {
+    for (statement_index, statement) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
             results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             return (results, None);
         }
 
         match executor.execute_statement(statement).await {
-            Ok(result) => results.push(result.into()),
+            Ok(result) => results.push(ExecuteMultiResult::success_with_index(result, statement_index)),
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
-                results.push(ExecuteMultiResult::execution_error(error_query_result(err)));
+                results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(err), statement_index));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -3209,6 +3220,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -3336,6 +3348,8 @@ mod tests {
 
         assert_eq!(executor.executed, vec!["first", "fails"]);
         assert_eq!(results.len(), 2);
+        assert_eq!(results[0].statement_index, Some(0));
+        assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
     }
@@ -3374,6 +3388,10 @@ mod tests {
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
+        assert_eq!(
+            results.iter().map(|result| result.statement_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
         assert!(results[1].execution_error);
         assert_eq!(error_action, None);
     }
@@ -3412,19 +3430,24 @@ mod tests {
 
         assert_eq!(executor.executed, vec!["first", "disconnects"]);
         assert_eq!(results.len(), 2);
+        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(results[1].execution_error);
         assert_eq!(error_action, Some(PoolErrorAction::ReconnectAndRetry));
     }
 
     #[test]
-    fn execute_multi_result_serializes_error_marker_only_for_synthesized_errors() {
+    fn execute_multi_result_serializes_client_metadata_only_when_present() {
         let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
         assert!(success.get("execution_error").is_none());
+        assert!(success.get("statement_index").is_none());
 
-        let failure =
-            serde_json::to_value(ExecuteMultiResult::execution_error(error_query_result("failed".to_string())))
-                .unwrap();
+        let failure = serde_json::to_value(ExecuteMultiResult::execution_error_with_index(
+            error_query_result("failed".to_string()),
+            2,
+        ))
+        .unwrap();
         assert_eq!(failure.get("execution_error"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(failure.get("statement_index"), Some(&serde_json::json!(2)));
         assert_eq!(failure.get("columns"), Some(&serde_json::json!(["Error"])));
     }
 
@@ -4222,6 +4245,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         };
 
         let params = external_driver_query_params(
