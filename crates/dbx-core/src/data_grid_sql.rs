@@ -16,8 +16,8 @@ use data_grid_tdengine_sql::{
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_single_row_insert_statements,
-    TablePaginationStrategy,
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    uses_single_row_insert_statements, TablePaginationStrategy,
 };
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
@@ -828,6 +828,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_tdengine_existing_rows(options) {
         return Some(error);
     }
+    if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
+        return Some(error);
+    }
 
     let not_null_columns: Vec<String> = options
         .table_meta
@@ -876,6 +879,24 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     }
 
     None
+}
+
+fn validate_oracle_keyless_lob_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_oracle_row_id(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+    let has_lob_column =
+        options.table_meta.columns.as_deref().unwrap_or(&[]).iter().any(|column| is_oracle_lob_type(&column.data_type));
+    if !has_lob_column {
+        return None;
+    }
+
+    // LOB equality is unsupported in Oracle-compatible SQL. Refuse unsafe
+    // keyless writes instead of dropping LOB predicates and risking extra rows.
+    Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.".to_string())
 }
 
 fn validate_clickhouse_mutable_updates(options: &DataGridSaveStatementOptions) -> Option<String> {
@@ -1961,8 +1982,16 @@ fn is_textual_column_type(data_type: &str) -> bool {
         || lower.starts_with("national character varying")
 }
 
+fn is_oracle_lob_type(data_type: &str) -> bool {
+    let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("");
+    matches!(base, "blob" | "clob" | "nclob" | "bfile" | "lob")
+        || lower.starts_with("binary large object")
+        || lower.starts_with("character large object")
+}
+
 fn is_oracle_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
-    database_type == Some(DatabaseType::Oracle) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+    uses_oracle_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
 }
 
 pub(crate) fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
@@ -3366,6 +3395,141 @@ mod tests {
             result.statements,
             vec![
                 "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_AT\") VALUES (1, TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'));"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oceanbase_oracle_lob_deletes_with_synthetic_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DATA_REPORT_SUB_TASK".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column(DBX_ROWID_COLUMN, "VARCHAR2", false, None),
+                    column("ID", "VARCHAR2(100)", false, None),
+                    column("SMC_RESPONSE", "CLOB", true, None),
+                    column("RAW_PAYLOAD", "BLOB", true, None),
+                    column("ARCHIVE_VALUE", "LOB", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_ROWID_COLUMN.to_string(),
+                "ID".to_string(),
+                "SMC_RESPONSE".to_string(),
+                "RAW_PAYLOAD".to_string(),
+                "ARCHIVE_VALUE".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![
+                vec![json!("*AAABk1AAEAAAAAgAAA"), json!("task-1"), json!("response"), json!("0011"), json!("archive")],
+                vec![json!("*AAABk1AAEAAAAAgAAB"), json!("task-2"), Value::Null, Value::Null, Value::Null],
+            ],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAA';",
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAB';",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oceanbase_oracle_lob_delete_with_declared_primary_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("TITLE", "VARCHAR2(100)", false, None),
+                    column("BODY", "CLOB", true, None),
+                    column("CONTENT", "BLOB", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "TITLE".to_string(), "BODY".to_string(), "CONTENT".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(42), json!("report"), json!("body"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM \"APP\".\"DOCUMENTS\" WHERE \"ID\" = 42;"]);
+    }
+
+    #[test]
+    fn rejects_oceanbase_oracle_keyless_lob_writes_without_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("TITLE", "VARCHAR2(100)", false, None), column("BODY", "CLOB", true, None)]),
+            },
+            columns: vec!["TITLE".to_string(), "BODY".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("duplicate title"), json!("unique body")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.")
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn preserves_oceanbase_oracle_keyless_predicates_for_comparable_columns() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "TASK_STATUS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("TASK_NAME", "VARCHAR2(100)", false, None),
+                    column("STATUS", "VARCHAR2(16)", true, None),
+                ]),
+            },
+            columns: vec!["TASK_NAME".to_string(), "STATUS".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("task-1"), json!("RUNNING")], vec![json!("task-2"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-1' AND \"STATUS\" = 'RUNNING';",
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-2' AND \"STATUS\" IS NULL;",
             ]
         );
     }
