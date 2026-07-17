@@ -1054,8 +1054,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               </div>
             </div>
 
-            <!-- Keep this fixed height in sync with the embedded DataGrid toolbar when switching result views. -->
-            <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex h-7 shrink-0 items-center border-b bg-muted/20">
+            <!-- Keep this height in sync with the embedded result toolbar. -->
+            <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex h-8 shrink-0 items-center border-b bg-muted/20">
               <QueryResultViewSwitcher
                 :active-view="activeOutputView"
                 :can-show-result="canShowResultOutput"

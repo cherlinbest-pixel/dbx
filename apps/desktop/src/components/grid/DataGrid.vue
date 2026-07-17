@@ -7375,12 +7375,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
-        <!-- Result and standalone output views must share a fixed toolbar height to prevent layout shifts. -->
-        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell flex h-7 min-w-0 shrink-0 border-b bg-muted/20">
+        <!-- Leave real vertical space around the 28px controls instead of fitting them against the border. -->
+        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell flex h-8 min-w-0 shrink-0 items-center border-b bg-muted/20">
           <div v-if="hasResultToolbarLeadingSlot" class="flex shrink-0 items-center border-r">
             <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
           </div>
-          <div class="data-grid-topbar-scroll min-w-0 flex-1 overflow-x-hidden">
+          <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
+          <div class="data-grid-topbar-scroll min-w-0 flex-1 overflow-clip">
             <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
               <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
                 <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">

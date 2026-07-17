@@ -87,10 +87,23 @@ test("embedded and standalone result toolbars share the same fixed height", () =
   const standaloneClasses = contentArea.match(/ref="standaloneResultToolbarRef" class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
   const embeddedClasses = dataGrid.match(/ref="dataGridTopbarRef"[^>]+class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
 
-  assert.ok(standaloneClasses.includes("h-7"));
-  assert.ok(embeddedClasses.includes("h-7"));
+  assert.ok(standaloneClasses.includes("h-8"));
+  assert.ok(embeddedClasses.includes("h-8"));
+  assert.ok(standaloneClasses.includes("items-center"));
+  assert.ok(embeddedClasses.includes("items-center"));
+  assert.ok(!standaloneClasses.includes("h-7"));
+  assert.ok(!embeddedClasses.includes("h-7"));
   assert.ok(!standaloneClasses.includes("min-h-7"));
   assert.ok(!embeddedClasses.includes("min-h-7"));
+});
+
+test("embedded result toolbar cannot scroll vertically", () => {
+  const dataGrid = source(dataGridPath);
+  const scrollClasses = dataGrid.match(/class="data-grid-topbar-scroll ([^"]+)"/)?.[1].split(/\s+/) ?? [];
+
+  assert.ok(scrollClasses.includes("overflow-clip"));
+  assert.ok(!scrollClasses.some((className) => className.startsWith("overflow-x-")));
+  assert.ok(!scrollClasses.some((className) => className.startsWith("overflow-y-")));
 });
 
 test("DataGrid marks toolbar refresh separately from current-result reloads", () => {
